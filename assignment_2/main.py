@@ -4,6 +4,7 @@ from os.path import join
 from typing import Tuple
 import matplotlib.pyplot as plt
 
+
 class MnistDataloader:
     def __init__(self, training_images_filepath, training_labels_filepath,
                  test_images_filepath, test_labels_filepath):
@@ -29,29 +30,29 @@ class MnistDataloader:
 
         return images, labels
 
-    def collect_indices_of_digit(self, labels, digit: int):
-        digit_indices = np.where(labels == digit)[0]
-        print(f"Total training images of digit {digit}: {len(digit_indices)}")
-        return digit_indices
 
-
-    def random_seive(self, count : int, training_data : np.ndarray, training_labels : np.ndarray):
-        training_data_dict = dict()
+    def refine_data(self, to_sieve : bool, data: np.ndarray, labels: np.ndarray, count: int = -1) -> dict[int: np.ndarray]:
+        data_dict = dict()
         for digit in range(0, 3):
-            indices = self.collect_indices_of_digit(training_labels, digit)
-            np.random.choice(uuin
-            training_data_dict[digit] =
+            indices = np.where(labels == digit)[0]
+            if to_sieve: # Sieve the data for the training data set
+                selected_indices = np.random.choice(indices, count, replace=False)
+                data_dict[digit] = data[selected_indices]
+            else: # Called for test data set
+                data_dict[digit] = data[indices]
+
+        return data_dict
 
 
-    def load_data(self) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+    def load_data(self) -> Tuple[dict[int: np.ndarray], dict[int: np.ndarray]]:
         x_train, y_train = self.read_images_labels(self.training_images_filepath, self.training_labels_filepath)
         x_test, y_test = self.read_images_labels(self.test_images_filepath, self.test_labels_filepath)
-        for i in range(len(y_train)):
-            print(f"{y_train[i]}: {y_train[i]}")
-        return (x_train, y_train), (x_test, y_test)
+        sieved_training_data = self.refine_data(to_sieve = True, data=x_train, labels=y_train, count=100)
+        refined_test_data = self.refine_data(to_sieve = False, data=x_test, labels=y_test)
+        return sieved_training_data, refined_test_data
 
 
-def init() -> tuple:
+def init() -> Tuple[dict[int: np.ndarray], dict[int: np.ndarray]]:
     # Set file paths
     input_path = 'input'
     training_images_filepath = join(input_path, 'train-images.idx3-ubyte')
@@ -62,9 +63,7 @@ def init() -> tuple:
     # Load MNIST dataset
     mnist_dataloader = MnistDataloader(training_images_filepath, training_labels_filepath,
                                        test_images_filepath, test_labels_filepath)
-    (x_train, y_train), (x_test, y_test) = mnist_dataloader.load_data()
     return mnist_dataloader.load_data()
-
 
 
 def show_images(images, title_texts) -> None:
@@ -79,65 +78,102 @@ def show_images(images, title_texts) -> None:
     plt.tight_layout()
     plt.show()
 
+def flatten_and_normalize_solo(image: np.ndarray) -> np.ndarray:
+    f = image.flatten(order='F')  # Flattening an image matrix to an array, Fortran-like, Column-stacking
+    f = (f - f.min()) / (f.max() - f.min())  # Normalization, to make data entries between 0 and 1
+    return f
+
+def flatten_and_normalize(dataset: np.ndarray) -> np.ndarray:
+    print(f"Flattening dataset with shape {dataset.shape}")
+    return np.array([flatten_and_normalize_solo(x) for x in dataset])
+
+def flatten_dict(old_dict: dict[int: np.ndarray], new_dict: dict) -> None:
+    for key in old_dict.keys():
+        new_dict[key] = flatten_and_normalize(old_dict[key])
 
 
 
-def pca():
-    pass
+
+def pca(training_data : dict[int: np.ndarray], desired_variance : float) -> None:
+    assert 1 >= desired_variance >= 0
+
+    data_matrix = np.concatenate(list(training_data.values()), axis=0) #X
+    mean = np.mean(data_matrix, axis=0) # mu along each column
+    centered_data_matrix = data_matrix - mean
+    num_samples = data_matrix.shape[0]
+    covariance_matrix = np.matmul(centered_data_matrix, centered_data_matrix.T) / (num_samples - 1)
+    eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
+    tupled_eigendata = zip(eigenvalues, eigenvectors.T)
+    sorted_eigendata = sorted(tupled_eigendata, key=lambda x: x[0], reverse=True)
+    sorted_eigenvalues = sorted(eigenvalues, reverse=True)
+
+    pca_components = 0
+    for i in range(len(eigenvalues) + 1):
+        variance = sum(sorted_eigenvalues[:i]) / sum(sorted_eigenvalues)
+        print(f"PCA with {i} components has variance {variance}")
+        if variance >= desired_variance:
+            pca_components = i
+            print(f"Reached/Surpassed desired variance of {desired_variance} with {pca_components} components")
+            break
+
+def fda(training_data : dict[int: np.ndarray]):
+    all_matrices = np.concatenate(list(training_data.values()), axis=0)
+    overall_mean = np.mean(all_matrices, axis=0)
+
+    between_class_scatter = np.zeros((28*28, 28*28))
+    num_classes = len(training_data.keys())
+    for c in training_data.keys():
+        num_samples_of_class = len(training_data[c])
+        class_mean = np.mean(training_data[c], axis=0)
+        outer_product = np.outer(class_mean - overall_mean, class_mean - overall_mean)
+        between_class_scatter += num_samples_of_class * outer_product
+
+    within_class_scatter = np.zeros((28*28, 28*28))
+    for c in training_data.keys():
+        class_mean = np.mean(training_data[c], axis=0)
+        class_matrix = sum([np.outer(x - class_mean, x - class_mean) for x in training_data[c]])
+        within_class_scatter += class_matrix
+
+    eigenvalues, eigenvectors = np.linalg.eig(np.linalg.pinv(within_class_scatter) @ between_class_scatter)
+    indices = np.argsort(-eigenvalues.real)
+    W = eigenvectors[:, indices]
 
 
-def calculate_mle(image_indices, images):
+
+def mle(digit : int, training_data : dict[int: np.ndarray]):
     # Create a flattened, normalized np array of images
-    raw_data = []
+    images = training_data[digit]
 
-    mean_temp = np.zeros(784)
-    print(f"shape of mean_temp = {mean_temp.shape}")
-
-    for i in image_indices:
-        f = images[i].flatten(order='F')  # Flattening an image matrix to an array, Fortran-like, Column-stacking
-        print(f"shape of f = {f.shape}")
-        mean_temp += f
-        f = (f - f.min()) / (f.max() - f.min())  # Normalization, to make data entries between 0 and 1
-        raw_data.append(f)
-    flattened_images = np.array(raw_data)  # Our normalized image vectors
-
-    mean_temp /= len(image_indices)
-    mean_temp = mean_temp.reshape(images[0].shape, order='F')
-    print(f"shape of mean_temp = {mean_temp.shape}")
-    # show_images([mean_temp], ["MeanTitle"])
-
-    n = len(image_indices)  # Number of training images of a particular dataset
-    assert n == len(flattened_images)
+    n = len(images)  # Number of training images of a particular dataset
 
     # Mean Calculation
-    mean = np.sum(flattened_images, axis=0)  # Get the vector sum
+    mean = np.sum(images, axis=0)  # Get the vector sum
     mean = np.divide(mean, n)  # Divide it by the number of images
 
     # Covariance Calculation
     covariance = np.zeros((len(mean), len(mean)))  # Initialize cov matrix to a 0-matrix
-    for x in flattened_images:
+    for x in images:
         covariance += ((x - mean) * ((x - mean).transpose()))
     covariance /= n  # Divide by the number of samples
-
-    print(f"Covariance matrix: {covariance}")
-    print(f"Sum of covariance matrix: {np.sum(covariance)}")
-
-    rng = np.random.default_rng()
-    vector = rng.multivariate_normal(mean, covariance, 1).T
-    print(f"shape of vector = {vector.shape}")
-    vector = vector.reshape(images[0].shape, order='F')
-    print(f"shape of vector = {vector.shape}")
-
-    show_images([vector], title_texts=['Sampled image'])
 
 
 def main():
     # x are images and y are labels
-    (x_train, y_train), (x_test, y_test) = init()
-    indices = dict()
-    for digit in range(0, 10):
-        indices[digit] = collect_images_of_digit(y_train, digit)
-    calculate_mle(indices[8], x_train)
+    training_data, test_data = init()
+    print(training_data)
+    print(f"Len of training_data: {len(training_data)}")
+    print(f"Len of training_data[1]: {len(training_data[1])}")
+    print(f"Shape of training_data[1] : {training_data[1].shape}")
+    print(f"Shape of training_data[1][0] : {training_data[1][0].shape}")
+    flattened_training_data = dict()
+    flatten_dict(training_data, flattened_training_data)
+
+    for v in training_data.values():
+        print(f"{v.shape}")
+    # calculate_mle(2, training_data)
+    mle(1, flattened_training_data)
+    pca(flattened_training_data, 0.95)
+    fda(flattened_training_data)
 
 
 if __name__ == '__main__':
