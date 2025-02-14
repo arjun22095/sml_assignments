@@ -51,7 +51,6 @@ class MnistDataloader:
         refined_test_data = self.refine_data(to_sieve = False, data=x_test, labels=y_test)
         return sieved_training_data, refined_test_data
 
-
 def init() -> Tuple[dict[int: np.ndarray], dict[int: np.ndarray]]:
     # Set file paths
     input_path = 'input'
@@ -64,7 +63,6 @@ def init() -> Tuple[dict[int: np.ndarray], dict[int: np.ndarray]]:
     mnist_dataloader = MnistDataloader(training_images_filepath, training_labels_filepath,
                                        test_images_filepath, test_labels_filepath)
     return mnist_dataloader.load_data()
-
 
 def show_images(images, title_texts) -> None:
     cols = 5
@@ -91,36 +89,47 @@ def flatten_dict(old_dict: dict[int: np.ndarray], new_dict: dict) -> None:
     for key in old_dict.keys():
         new_dict[key] = flatten_and_normalize(old_dict[key])
 
-
-
-
 def pca(training_data : dict[int: np.ndarray], desired_variance : float) -> None:
     assert 1 >= desired_variance >= 0
 
-    data_matrix = np.concatenate(list(training_data.values()), axis=0) #X
-    mean = np.mean(data_matrix, axis=0) # mu along each column
-    centered_data_matrix = data_matrix - mean
-    num_samples = data_matrix.shape[0]
-    covariance_matrix = np.matmul(centered_data_matrix, centered_data_matrix.T) / (num_samples - 1)
-    eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
-    tupled_eigendata = zip(eigenvalues, eigenvectors.T)
-    sorted_eigendata = sorted(tupled_eigendata, key=lambda x: x[0], reverse=True)
-    sorted_eigenvalues = sorted(eigenvalues, reverse=True)
+    data_matrix = np.concatenate(list(training_data.values()), axis=0).T # X = 784 x 300
 
+    # Calculating mu and X_c
+    mean = np.mean(data_matrix, axis=1) # mu along each row as we transposed the matrix
+    centered_data_matrix = data_matrix - mean[:, np.newaxis] # To convert mu from (784,) -> (784,1)
+    num_samples = data_matrix.shape[1] # 300
+
+    # Calculating Covariance Matrix
+    covariance_matrix = np.matmul(centered_data_matrix, centered_data_matrix.T) / (num_samples - 1)
+
+    # Calculating Eigenvalues & Eigenvectors and sorting them in descending order
+    eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
+    indices = np.argsort(-eigenvalues)
+    sorted_eigenvalues = eigenvalues[indices]
+    sorted_eigenvectors = eigenvectors[:, indices]
+
+    # Finding the number of PCA components required to gain the desired variance
     pca_components = 0
     for i in range(len(eigenvalues) + 1):
         variance = sum(sorted_eigenvalues[:i]) / sum(sorted_eigenvalues)
-        print(f"PCA with {i} components has variance {variance}")
+        # print(f"PCA with {i} components has variance {variance}")
         if variance >= desired_variance:
             pca_components = i
             print(f"Reached/Surpassed desired variance of {desired_variance} with {pca_components} components")
             break
 
-def fda(training_data : dict[int: np.ndarray]):
-    all_matrices = np.concatenate(list(training_data.values()), axis=0)
-    overall_mean = np.mean(all_matrices, axis=0)
+    # Constructing U_p and Y matrices
+    U_p = sorted_eigenvectors[:, :pca_components]
+    print(f"Shape of U_p: {U_p.shape}")
+    Y = np.matmul(U_p.T, centered_data_matrix)
+    print(f"Shape of Y: {Y.shape}")
 
-    between_class_scatter = np.zeros((28*28, 28*28))
+def fda(training_data : dict[int: np.ndarray]) -> np.ndarray: # Returns W
+    data_matrix = np.concatenate(list(training_data.values()), axis=0)
+    overall_mean = np.mean(data_matrix, axis=0)
+    feature_dim = overall_mean.shape[0]
+
+    between_class_scatter = np.zeros((feature_dim, feature_dim))
     num_classes = len(training_data.keys())
     for c in training_data.keys():
         num_samples_of_class = len(training_data[c])
@@ -128,7 +137,7 @@ def fda(training_data : dict[int: np.ndarray]):
         outer_product = np.outer(class_mean - overall_mean, class_mean - overall_mean)
         between_class_scatter += num_samples_of_class * outer_product
 
-    within_class_scatter = np.zeros((28*28, 28*28))
+    within_class_scatter = np.zeros((feature_dim, feature_dim))
     for c in training_data.keys():
         class_mean = np.mean(training_data[c], axis=0)
         class_matrix = sum([np.outer(x - class_mean, x - class_mean) for x in training_data[c]])
@@ -137,8 +146,7 @@ def fda(training_data : dict[int: np.ndarray]):
     eigenvalues, eigenvectors = np.linalg.eig(np.linalg.pinv(within_class_scatter) @ between_class_scatter)
     indices = np.argsort(-eigenvalues.real)
     W = eigenvectors[:, indices]
-
-
+    return W
 
 def mle(digit : int, training_data : dict[int: np.ndarray]):
     # Create a flattened, normalized np array of images
@@ -153,27 +161,46 @@ def mle(digit : int, training_data : dict[int: np.ndarray]):
     # Covariance Calculation
     covariance = np.zeros((len(mean), len(mean)))  # Initialize cov matrix to a 0-matrix
     for x in images:
-        covariance += ((x - mean) * ((x - mean).transpose()))
+        covariance += np.matmul((x - mean), (x - mean).T)
     covariance /= n  # Divide by the number of samples
 
+def lda_train(training_data : dict[int: np.ndarray]) -> Tuple[dict[int: np.ndarray], np.ndarray]:
+    feature_dim = training_data[0].shape[1]
+    total_samples = sum(len(training_data[c]) for c in training_data.keys())
+    print(f"Total samples: {total_samples}")
+    classes = training_data.keys()
+    class_means = {c : np.mean(training_data[c], axis=0) for c in classes}
+    covariance_matrix = np.zeros((feature_dim, feature_dim))
+    for c in classes:
+        covariance_matrix += np.matmul((training_data[c] - class_means[c]).T, (training_data[c] - class_means[c]))
+    covariance_matrix /= (len(classes) - 1)
+
+    return class_means, covariance_matrix
+
+
+def lda_test(testing_data : dict[int: np.ndarray], class_means : dict[int: np.ndarray], covariance_matrix : np.ndarray):
+    data_matrix = np.concatenate(list(testing_data.values()), axis=0)
+    labels = np.concatenate(list(testing_data.keys()), axis=0)
 
 def main():
     # x are images and y are labels
     training_data, test_data = init()
-    print(training_data)
-    print(f"Len of training_data: {len(training_data)}")
-    print(f"Len of training_data[1]: {len(training_data[1])}")
-    print(f"Shape of training_data[1] : {training_data[1].shape}")
-    print(f"Shape of training_data[1][0] : {training_data[1][0].shape}")
+
     flattened_training_data = dict()
     flatten_dict(training_data, flattened_training_data)
 
-    for v in training_data.values():
-        print(f"{v.shape}")
-    # calculate_mle(2, training_data)
+    flattened_test_data = dict()
+    flatten_dict(test_data, flattened_test_data)
+
     mle(1, flattened_training_data)
     pca(flattened_training_data, 0.95)
-    fda(flattened_training_data)
+    W = fda(flattened_training_data)
+
+    for c, data in training_data.items():
+        print(f"{c}: {data}")
+
+    fda_training_data = {c : np.matmul(data, W) for c, data in flattened_training_data.items()}
+    fda_test_data = {c : np.matmul(data, W) for c, data in flattened_test_data.items()}
 
 
 if __name__ == '__main__':
